@@ -1,0 +1,27 @@
+apiVersion: apps/v1beta2
+kind: Deployment
+metadata:
+  name: bluegreen-0.0.2
+  labels:
+    app: bluegreen
+    version: 0.0.2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bluegreen
+      version: 0.0.2
+  template:
+    metadata:
+      labels:
+        app: bluegreen
+        version: 0.0.2
+    spec:
+      containers:
+      - name: bluegreen
+        image: 169.56.99.56:30060/ebaatar/bluegreen:0.0.2
+        ports:
+        - containerPort: 8080
+        imagePullPolicy: Always
+  strategy:
+    type: RollingUpdate
