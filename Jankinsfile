@@ -1,0 +1,89 @@
+def label = "jenkins-${UUID.randomUUID().toString()}"
+  
+podTemplate(label:label,
+    containers: [
+        containerTemplate(name: 'maven', image: 'maven:3.5.2-jdk-8-alpine', ttyEnabled: true, command: 'cat'),
+        containerTemplate(name: 'docker', image: 'docker', ttyEnabled: true, command: 'cat'),
+        containerTemplate(name: 'kubectl', image: 'lachlanevenson/k8s-kubectl', ttyEnabled: true, command: 'cat')        
+    ],
+    alwaysPullImage: true
+    ) {
+  
+    node(label) {
+        stage('소스 checkout') {
+            def repo = checkout scm
+        }
+          
+        stage('빌드') {
+            container('maven') {
+                sh 'mvn clean package'
+            }
+        }
+        
+        def DOCKER_REGISTRY_SPACE = "ebaatar"
+        def DOCKER_IMAGE = "bluegreen"
+  
+        def DOCKER_IMAGE_URL = '${DOCKER_REGISTRY}/${DOCKER_IMAGE}:' + VERSION
+  
+        stage('Build Docker image') {
+            container('docker') {
+                  
+                if (DOCKER_CREDENTIAL) {
+                    withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIAL, passwordVariable: 'DOCKER_PASSWORD', usernameVariable: 'DOCKER_USER')]) {
+                        sh """
+                            docker login --username=${DOCKER_REGISTRY} -u ${DOCKER_USER} -p ${DOCKER_PASSWORD}
+                            docker build -t ${DOCKER_IMAGE_URL} .
+                            docker push ${DOCKER_IMAGE_URL}
+                        """
+                    }  
+                } else {
+                    sh """
+                        docker build -t ${DOCKER_IMAGE_URL} .
+                        docker push ${DOCKER_IMAGE_URL}
+                    """
+                }
+            }
+        }
+  
+        stage('k8s 배포') {
+            container('kubectl') {
+                DEPLOYMENT_NAME = APP_NAME + "-" + VERSION
+                sh "kubectl apply -n ${K8S_NAMESPACE} -f ./k8s/deploy.yaml"
+                try {
+                    timeout(time: 300, unit: 'SECONDS') {
+                        sh "kubectl rollout status deployments/${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE}"
+                    }
+                } catch (e) {
+                    echo 'Container 기동 중 Timeout 발생'
+                    sh "kubectl describe deploy ${DEPLOYMENT_NAME} -n ${K8S_NAMESPACE}"
+                    throw e
+                }
+            }
+        }
+        stage('api 테스트') {
+            container('kubectl') {
+                // api 테스트를 위한 임시 서비스 생성
+                sh "kubectl apply -n ${K8S_NAMESPACE} -f ./k8s/service_canary_api.yaml"
+            }
+            container('postbot') {
+                // postbot 설치. Nexus에 구성된 NPM registry 에서 다운받아 설치한다.
+                // postbot image를 사용하는 경우 설치할 필요 없다.
+                // // sh 'npm --registry http://myrepo.skcc.com/content/groups/npm-group/ install postbot@0.5.0 -g'
+                // postbot을 실행하여 API 테스트 수행 및 결과를 생성한다. 실행 옵션은 postbot 사용가이드 참고
+                sh 'postbot run -d ./apitest --environment ./apitest/publicAPIenv.json'
+            }
+            container('kubectl') {
+                // api 테스트를 위한 임시 서비스 삭제
+                sh "kubectl delete -n ${K8S_NAMESPACE} services/service-canary-api"
+            }
+        }      
+        stage('report 작성'){
+            // postbot을 통해 생성된 수행결과 report를 jenkins 상에서 보기 위해 해당 report 파일의 경로를 지정한다.
+            // reportDir : postbot을 통해 report가 생성된 경로. 기본값은 {workspace}/report (postbot의 --report_path 옵션)
+            // reportFiles : postbot을 통해 생성된 report 파일명. "apiTestReport.html" 로 고정
+            // reportName : Jenkins 실행결과 페이지 좌측에 보여줄 report 페이지 링크 제목
+            // reportTitles : Jenkins 내 report 페이지의 상단 탭에 표시할 제목
+            publishHTML([allowMissing: false, alwaysLinkToLastBuild: true, keepAll: true, reportDir: './report', reportFiles: 'apiTestReport.html', reportName: 'API Test Result Report', reportTitles: 'API Test Result'])
+        }
+    }
+}
